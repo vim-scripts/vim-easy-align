@@ -18,19 +18,22 @@ endif
 
 call extend(g:easy_align_delimiters_merged, g:easy_align_delimiters)
 
-function! s:do_align(fl, ll, pattern, nth, ml, mr, stick_to_left, recursive)
+function! s:do_align(fl, ll, fc, lc, pattern, nth, ml, mr, stick_to_left, recursive)
   let lines         = {}
   let just_len      = 0
   let max_delim_len = 0
   let max_tokens    = 0
   let pattern       = '\s*\(' .a:pattern. '\)\s*'
   for line in range(a:fl, a:ll)
-    let tokens     = split(getline(line), pattern.'\zs')
+    let tokens = split(a:lc ?
+                      \ strpart(getline(line), a:fc - 1, a:lc - a:fc + 1) :
+                      \ strpart(getline(line), a:fc - 1),
+                      \ pattern.'\zs')
     if empty(tokens)
       continue
     endif
 
-    let max_tokens = len(tokens) > max_tokens ? len(tokens) : max_tokens
+    let max_tokens = max([len(tokens), max_tokens])
     let nth        = match(tokens[0], '^\s*$') != -1 ? a:nth + 1 : a:nth
 
     if len(tokens) < nth
@@ -38,44 +41,44 @@ function! s:do_align(fl, ll, pattern, nth, ml, mr, stick_to_left, recursive)
     endif
 
     let last   = tokens[nth - 1]
-    let before = (nth > 1 ? join(tokens[0 : nth - 2], '') : '') . substitute(last, pattern.'$', '', '')
-    let after  = join(tokens[nth : -1], '')
+    let prefix = (nth > 1 ? join(tokens[0 : nth - 2], '') : '') . substitute(last, pattern.'$', '', '')
+    let suffix = join(tokens[nth : -1], '')
 
     if match(last, pattern.'$') == -1
       continue
     endif
 
     let delim         = matchlist(tokens[nth - 1], pattern)[1]
-    let just_len      = len(before) > just_len ? len(before) : just_len
-    let max_delim_len = len(delim) > max_delim_len ? len(delim) : max_delim_len
-    let lines[line]   = [before, after, delim]
+    let just_len      = max([len(prefix), just_len])
+    let max_delim_len = max([len(delim), max_delim_len])
+    let lines[line]   = [prefix, suffix, delim]
   endfor
 
   for [line, tokens] in items(lines)
     let [prefix, suffix, delim] = tokens
-    let pad = just_len - len(prefix)
-    if pad > 0
-      for i in range(pad)
-        if a:stick_to_left
-          let suffix = ' '. suffix
-        else
-          let prefix = prefix . ' '
-        endif
-      endfor
+
+    let pad = repeat(' ', just_len - len(prefix))
+    if a:stick_to_left
+      let suffix = pad . suffix
+    else
+      let prefix = prefix . pad
     endif
-    let pad = max_delim_len - len(delim)
-    if pad > 0
-      for i in range(pad)
-        let delim = ' '. delim
-      endfor
-    endif
-    let ml = empty(prefix) ? '' : a:ml
-    let mr = empty(suffix) ? '' : a:mr
-    call setline(line, substitute(join([prefix, ml, delim, mr, suffix], ''), '\s*$', '', ''))
+
+    let delim   = repeat(' ', max_delim_len - len(delim)). delim
+    let cline   = getline(line)
+    let before  = strpart(cline, 0, a:fc - 1)
+    let after   = a:lc ? strpart(cline, a:lc) : ''
+
+    let ml      = empty(prefix) ? '' : a:ml
+    let mr      = (empty(suffix . after) || (empty(suffix) && stridx(after, a:mr) == 0)) ? '' : a:mr
+    let aligned = join([prefix, ml, delim, mr, suffix], '')
+    let aligned = empty(after) ? substitute(aligned, '\s*$', '', '') : aligned
+
+    call setline(line, before.aligned.after)
   endfor
 
   if a:recursive && a:nth < max_tokens
-    call s:do_align(a:fl, a:ll, a:pattern, a:nth + 1, a:ml, a:mr, a:stick_to_left, a:recursive)
+    call s:do_align(a:fl, a:ll, a:fc, a:lc, a:pattern, a:nth + 1, a:ml, a:mr, a:stick_to_left, a:recursive)
   endif
 endfunction
 
@@ -137,6 +140,8 @@ function! easy_align#align(...) range
   if has_key(g:easy_align_delimiters_merged, ch)
     let dict = g:easy_align_delimiters_merged[ch]
     call s:do_align(a:firstline, a:lastline,
+                  \ visualmode() == '' ? min([col("'<"), col("'>")]) : 1,
+                  \ visualmode() == '' ? max([col("'<"), col("'>")]) : 0,
                   \ get(dict, 'pattern', ch),
                   \ n,
                   \ get(dict, 'margin_left', ' '),
