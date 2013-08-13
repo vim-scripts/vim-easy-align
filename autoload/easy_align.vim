@@ -44,7 +44,7 @@ let s:just = ['', '[R]']
 let s:known_options = {
 \ 'margin_left': [0, 1], 'margin_right': [0, 1], 'stick_to_left': [0],
 \ 'left_margin': [0, 1], 'right_margin': [0, 1],
-\ 'ignores': [3], 'ignore_unmatched': [0]
+\ 'ignores': [3], 'ignore_unmatched': [0], 'delimiter_align': [1]
 \ }
 
 if exists("*strwidth")
@@ -139,54 +139,86 @@ function! s:validate_options(opts)
   return a:opts
 endfunction
 
-function! s:do_align(just, all_tokens, fl, ll, fc, lc, pattern, nth, ml, mr, stick_to_left, ignore_unmatched, ignores, recursive)
+function! s:split_line(line, fc, lc, pattern, stick_to_left, ignore_unmatched, ignores)
+  let left    = a:lc ?
+    \ strpart(getline(a:line), a:fc - 1, a:lc - a:fc + 1) :
+    \ strpart(getline(a:line), a:fc - 1)
+  let idx     = 0
+  " Do not allow \zs
+  " 1: whole match
+  " 2: token
+  " 3: delimiter
+  let pattern = '^\(\(.\{-}\s*\)\(' .a:pattern. '\)\s' . (a:stick_to_left ? '*' : '\{-}') . '\)'
+  let tokens  = []
+  let delims  = []
+
+  " Phase 1: split
+  let ignorable = 0
+  let token = ''
+  while 1
+    let matches = matchlist(left, pattern, idx)
+    if empty(matches) | break | endif
+    if empty(matches[1])
+      let char = strpart(left, idx, 1)
+      if empty(char) | break | endif
+      let [match, part, delim] = [char, char, '']
+    else
+      let [match, part, delim] = matches[1 : 3]
+    endif
+
+    let ignorable = s:highlighted_as(a:line, idx + len(part) + a:fc, a:ignores)
+    if ignorable
+      let token .= match
+    else
+      call add(tokens, token . match)
+      call add(delims, delim)
+      let token = ''
+    endif
+
+    let idx += len(match)
+  endwhile
+
+  let leftover = token . strpart(left, idx)
+  if !empty(leftover)
+    call add(tokens, leftover)
+    call add(delims, '')
+  endif
+
+  " Preserve indentation - merge first two tokens
+  if len(tokens) > 1 && empty(s:rtrim(tokens[0]))
+    let tokens[1] = tokens[0] . tokens[1]
+    call remove(tokens, 0)
+    call remove(delims, 0)
+  endif
+
+  " Skip comment line
+  if ignorable && len(tokens) == 1 && a:ignore_unmatched
+    let tokens = []
+    let delims = []
+  endif
+
+  return [tokens, delims]
+endfunction
+
+function! s:do_align(just, all_tokens, all_delims, fl, ll, fc, lc, pattern, nth, ml, mr, da, stick_to_left, ignore_unmatched, ignores, recursive)
   let lines          = {}
   let max_just_len   = 0
   let max_delim_len  = 0
   let max_tokens     = 0
   let min_indent     = -1
-  let pattern        = '\s*\(' .a:pattern. '\)\s' . (a:stick_to_left ? '*' : '\{-}')
 
   " Phase 1
   for line in range(a:fl, a:ll)
     if !has_key(a:all_tokens, line)
       " Split line into the tokens by the delimiters
-      let raw_tokens = split(a:lc ?
-                        \ strpart(getline(line), a:fc - 1, a:lc - a:fc + 1) :
-                        \ strpart(getline(line), a:fc - 1),
-                        \ pattern.'\zs')
-      let concat = 0
-      if empty(a:ignores)
-        let tokens = raw_tokens
-      else
-        " Concat adjacent tokens that are split by ignorable delimiters
-        let tokens = []
-        let idx    = 0
-        for token in raw_tokens
-          let idx += len(token)
-          if concat
-            let tokens[len(tokens) - 1] .= token
-          else
-            call add(tokens, token)
-          endif
-          let concat = s:highlighted_as(line, idx + a:fc - 1, a:ignores)
-        endfor
-      endif
-
-      " Preserve indentation - merge first two tokens
-      if !empty(tokens) && match(tokens[0], '^\s*$') != -1
-        let tokens = extend([join(tokens[0:1], '')], tokens[2:-1])
-      endif
-
-      " Skip comment line
-      if concat && len(tokens) == 1 && a:ignore_unmatched
-        let tokens = []
-      endif
+      let [tokens, delims] = s:split_line(line, a:fc, a:lc, a:pattern, a:stick_to_left, a:ignore_unmatched, a:ignores)
 
       " Remember tokens for subsequent recursive calls
       let a:all_tokens[line] = tokens
+      let a:all_delims[line] = delims
     else
       let tokens = a:all_tokens[line]
+      let delims = a:all_delims[line]
     endif
 
     " Skip empty lines
@@ -204,7 +236,7 @@ function! s:do_align(just, all_tokens, fl, ll, fc, lc, pattern, nth, ml, mr, sti
       let nth = a:nth - 1 " make it 0-based
     else " Negative field number
       let nth = len(tokens) + a:nth
-      if match(tokens[len(tokens) - 1], pattern.'$') == -1
+      if empty(delims[len(delims) - 1])
         let nth -= 1
       endif
 
@@ -213,12 +245,11 @@ function! s:do_align(just, all_tokens, fl, ll, fc, lc, pattern, nth, ml, mr, sti
       endif
     endif
 
-    let last   = tokens[nth]
-    let prefix = (nth > 0 ? join(tokens[0 : nth - 1], '') : '')
-    let token  = substitute(last, pattern.'$', '', '')
-
-    let delim = get(matchlist(last, pattern.'$'), 1, '')
-    if empty(delim) && a:just == 0 && a:ignore_unmatched
+    let prefix = nth > 0 ? join(tokens[0 : nth - 1], '') : ''
+    let delim  = delims[nth]
+    let token  = s:rtrim( tokens[nth] )
+    let token  = s:rtrim( strpart(token, 0, len(token) - len(s:rtrim(delim))) )
+    if empty(delim) && !exists('tokens[nth + 1]') && a:just == 0 && a:ignore_unmatched
       continue
     endif
 
@@ -234,6 +265,7 @@ function! s:do_align(just, all_tokens, fl, ll, fc, lc, pattern, nth, ml, mr, sti
   " Phase 2
   for [line, elems] in items(lines)
     let tokens = a:all_tokens[line]
+    let delims = a:all_delims[line]
     let [nth, prefix, token, delim] = elems
 
     " Remove the leading whitespaces of the next token
@@ -256,11 +288,16 @@ function! s:do_align(just, all_tokens, fl, ll, fc, lc, pattern, nth, ml, mr, sti
     let tokens[nth] = token
 
     " Pad the delimiter
-    let dpad = repeat(' ', max_delim_len - s:strwidth(delim))
-    if a:stick_to_left
-      let rpad = rpad . dpad
+    let dpadl = max_delim_len - s:strwidth(delim)
+    if a:da ==? 'l'
+      let [dl, dr] = ['', repeat(' ', dpadl)]
+    elseif a:da ==? 'c'
+      let dl = repeat(' ', dpadl / 2)
+      let dr = repeat(' ', dpadl - dpadl / 2)
+    elseif a:da ==? 'r'
+      let [dl, dr] = [repeat(' ', dpadl), '']
     else
-      let delim = dpad . delim
+      call s:exit('Invalid delimiter_align: ' . a:da)
     endif
 
     " Before and after the range (for blockwise visual mode)
@@ -286,7 +323,7 @@ function! s:do_align(just, all_tokens, fl, ll, fc, lc, pattern, nth, ml, mr, sti
     endif
 
     " Align the token
-    let aligned = join([lpad, token, ml, delim, mr, rpad], '')
+    let aligned = join([lpad, token, ml, dl, delim, dr, mr, rpad], '')
     let tokens[nth] = aligned
 
     " Update the line
@@ -296,8 +333,8 @@ function! s:do_align(just, all_tokens, fl, ll, fc, lc, pattern, nth, ml, mr, sti
 
   if a:recursive && a:nth < max_tokens
     let just = a:recursive == 2 ? !a:just : a:just
-    call s:do_align(just, a:all_tokens, a:fl, a:ll, a:fc, a:lc, a:pattern,
-          \ a:nth + 1, a:ml, a:mr, a:stick_to_left, a:ignore_unmatched,
+    call s:do_align(just, a:all_tokens, a:all_delims, a:fl, a:ll, a:fc, a:lc, a:pattern,
+          \ a:nth + 1, a:ml, a:mr, a:da, a:stick_to_left, a:ignore_unmatched,
           \ a:ignores, a:recursive)
   endif
 endfunction
@@ -352,14 +389,19 @@ function! s:parse_args(args)
   " Poor man's option parser
   let idx = 0
   while 1
-    let midx = match(args, '{.*}\s*$', idx)
+    let midx = match(args, '\s*{.*}\s*$', idx)
     if midx == -1 | break | endif
 
     let cand = strpart(args, midx)
     try
+      let [l, r, c] = ['l', 'r', 'c']
+      let [L, R, C] = ['l', 'r', 'c']
       let o = eval(cand)
       if type(o) == 4
         let option = o
+        if args[midx - 1 : midx] == '\ '
+          let midx += 1
+        endif
         let args = strpart(args, 0, midx)
         break
       endif
@@ -384,10 +426,6 @@ function! s:parse_args(args)
     try   | call matchlist('', regexp)
     catch | call s:exit("Invalid regular expression: ". regexp)
     endtry
-    " Unsupported regular expression
-    if match(regexp, '\\zs') != -1
-      call s:exit("Using \\zs is not allowed. Use stick_to_left option instead.")
-    endif
     return [matches[1], regexp, option, 1]
   else
     let tokens = matchlist(args, '^\([1-9][0-9]*\|-[0-9]*\|\*\*\?\)\?\s*\(.\{-}\)\?$')
@@ -436,10 +474,15 @@ function! easy_align#align(just, expr) range
   if regexp
     let dict = { 'pattern': ch }
   else
-    if ch =~ '^\\\s\+$'
-      let ch = ' '
-    elseif ch =~ '^\\\\\s\+$'
-      let ch = '\'
+    " Resolving command-line ambiguity
+    if !empty(a:expr)
+      " '\ ' => ' '
+      if ch =~ '^\\\s\+$'
+        let ch = ' '
+      " '\\' => '\'
+      elseif ch =~ '^\\\\\s*$'
+        let ch = '\'
+      endif
     endif
     if !has_key(delimiters, ch)
       echon "\rUnknown delimiter key: ". ch
@@ -461,17 +504,28 @@ function! easy_align#align(just, expr) range
   if type(ml) == 0 | let ml = repeat(' ', ml) | endif
   if type(mr) == 0 | let mr = repeat(' ', mr) | endif
 
-  call s:do_align(just, {}, a:firstline, a:lastline,
-    \ visualmode() == '' ? min([col("'<"), col("'>")]) : 1,
-    \ visualmode() == '' ? max([col("'<"), col("'>")]) : 0,
+  let bvisual = visualmode() == ''
+
+  if recur && bvisual
+    echon "\rRecursive alignment is currently not supported in blockwise-visual mode"
+    return
+  endif
+
+  try
+    call s:do_align(just, {}, {}, a:firstline, a:lastline,
+    \ bvisual ? min([col("'<"), col("'>")]) : 1,
+    \ bvisual ? max([col("'<"), col("'>")]) : 0,
     \ get(dict, 'pattern', ch),
     \ nth,
     \ ml,
     \ mr,
+    \ get(dict, 'delimiter_align', get(g:, 'easy_align_delimiter_align', 'r')),
     \ get(dict, 'stick_to_left', 0),
     \ get(dict, 'ignore_unmatched', get(g:, 'easy_align_ignore_unmatched', 1)),
     \ get(dict, 'ignores', s:ignored_syntax()),
     \ recur)
-  call s:echon(just, n, regexp ? '/'.ch.'/' : ch)
+    call s:echon(just, n, regexp ? '/'.ch.'/' : ch)
+  catch 'exit'
+  endtry
 endfunction
 
