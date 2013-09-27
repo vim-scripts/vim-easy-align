@@ -95,7 +95,6 @@ function! s:ignored_syntax()
   endif
 endfunction
 
-let s:prev_echon_len = 0
 function! s:echon_(tokens)
   " http://vim.wikia.com/wiki/How_to_print_full_screen_width_messages
   let xy = [&ruler, &showcmd]
@@ -104,11 +103,6 @@ function! s:echon_(tokens)
 
     let winlen = winwidth(winnr()) - 2
     let len = len(join(map(copy(a:tokens), 'v:val[1]'), ''))
-    if len < s:prev_echon_len
-      echohl None
-      echon "\r". repeat(' ', min([winlen, s:prev_echon_len]))
-    endif
-    let s:prev_echon_len = len
     let ellipsis = len > winlen ? '..' : ''
 
     echon "\r"
@@ -130,7 +124,7 @@ function! s:echon_(tokens)
   endtry
 endfunction
 
-function! s:echon(l, n, r, d, o)
+function! s:echon(l, n, r, d, o, warn)
   let tokens = [
   \ ['Function', ':EasyAlign'],
   \ ['ModeMsg', get(s:mode_labels, a:l, a:l)],
@@ -141,8 +135,11 @@ function! s:echon(l, n, r, d, o)
   call extend(tokens, a:r == 1 ?
   \ [['Delimiter', '/'], ['String', a:d], ['Delimiter', '/']] :
   \ [['Identifier', a:d == ' ' ? '\ ' : (a:d == '\' ? '\\' : a:d)]])
-  if a:r == -1 | call add(tokens, ['Comment', ')']) | endif
+  if a:r == -1 | call extend(tokens, [['Normal', '_'], ['Comment', ')']]) | endif
   call add(tokens, ['Statement', empty(a:o) ? '' : ' '.string(a:o)])
+  if !empty(a:warn)
+    call add(tokens, ['WarningMsg', ' ('.a:warn.')'])
+  endif
 
   call s:echon_(tokens)
 endfunction
@@ -363,12 +360,12 @@ function! s:do_align(modes, all_tokens, all_delims, fl, ll, fc, lc, pattern, nth
     " Calculate the maximum number of tokens for a line within the range
     call s:max(max, { 'tokens': len(tokens) })
 
-    if a:nth > 0 " Positive field number
+    if a:nth > 0 " Positive N-th
       if len(tokens) < a:nth
         continue
       endif
       let nth = a:nth - 1 " make it 0-based
-    else " -0 or Negative field number
+    else " -0 or Negative N-th
       if a:nth == 0 && mode !=? 'l'
         let nth = len(tokens) - 1
       else
@@ -560,16 +557,19 @@ function! s:atoi(str)
   return (a:str =~ '^[0-9]\+$') ? str2nr(a:str) : a:str
 endfunction
 
-function! s:interactive(modes, vis, opts)
+function! s:interactive(modes, vis, opts, delims)
   let mode = s:shift(a:modes, 1)
   let n    = ''
   let ch   = ''
   let opts = s:compact_options(a:opts)
   let vals = deepcopy(s:option_values)
   let regx = 0
+  let warn = ''
 
   while 1
-    call s:echon(mode, n, -1, '', opts)
+    call s:echon(mode, n, -1, '', opts, warn)
+    let check = 0
+    let warn = ''
 
     let c  = getchar()
     let ch = nr2char(c)
@@ -587,16 +587,16 @@ function! s:interactive(modes, vis, opts)
     elseif ch == '-'
       if empty(n)      | let n = '-'
       elseif n == '-'  | let n = ''
-      else             | break
+      else             | let check = 1
       endif
     elseif ch == '*'
       if empty(n)      | let n = '*'
       elseif n == '*'  | let n = '**'
       elseif n == '**' | let n = ''
-      else             | break
+      else             | let check = 1
       endif
-    elseif c >= 48 && c <= 57 " Numbers
-      if n[0] == '*'   | break
+    elseif (c == 48 && len(n) > 0) || c > 48 && c <= 57 " Numbers
+      if n[0] == '*'   | let check = 1
       else             | let n = n . ch
       end
     elseif ch == "\<C-D>"
@@ -604,9 +604,21 @@ function! s:interactive(modes, vis, opts)
     elseif ch == "\<C-I>"
       let opts['idt'] = s:shift(vals['indentation'], 1)
     elseif ch == "\<C-L>"
-      let opts['lm'] = s:atoi(s:input("Left margin: ", get(opts, 'lm', ''), a:vis))
+      let lm = s:input("Left margin: ", get(opts, 'lm', ''), a:vis)
+      if empty(lm)
+        let warn = 'Set to default. Input 0 to remove it'
+        silent! call remove(opts, 'lm')
+      else
+        let opts['lm'] = s:atoi(lm)
+      endif
     elseif ch == "\<C-R>"
-      let opts['rm'] = s:atoi(s:input("Right margin: ", get(opts, 'rm', ''), a:vis))
+      let rm = s:input("Right margin: ", get(opts, 'rm', ''), a:vis)
+      if empty(rm)
+        let warn = 'Set to default. Input 0 to remove it'
+        silent! call remove(opts, 'rm')
+      else
+        let opts['rm'] = s:atoi(rm)
+      endif
     elseif ch == "\<C-U>"
       let opts['iu'] = s:shift(vals['ignore_unmatched'], 1)
     elseif ch == "\<C-G>"
@@ -633,22 +645,43 @@ function! s:interactive(modes, vis, opts)
     elseif ch == "\<C-_>" || ch == "\<C-X>"
       let prompt = 'Regular expression: '
       let ch = s:input(prompt, '', a:vis)
-      if !empty(ch)
+      if !empty(ch) && s:valid_regexp(ch)
         let regx = 1
-        let s:prev_echon_len = len(prompt . ch)
         break
+      else
+        let warn = 'Invalid regular expression: '.ch
       endif
+    elseif ch =~ '[[:print:]]'
+      let check = 1
     else
-      break
+      let warn = 'Invalid character'
+    endif
+
+    if check
+      if has_key(a:delims, ch)
+        break
+      else
+        let warn = 'Unknown delimiter key: '.ch
+      endif
     endif
   endwhile
   return [mode, n, ch, s:normalize_options(opts), regx]
 endfunction
 
-function! s:test_regexp(regexp)
-  try   | call matchlist('', a:regexp)
-  catch | call s:exit("Invalid regular expression: ". a:regexp)
+function! s:valid_regexp(regexp)
+  try
+    call matchlist('', a:regexp)
+  catch
+    return 0
   endtry
+  return 1
+endfunction
+
+function! s:test_regexp(regexp)
+  if !s:valid_regexp(a:regexp)
+    call s:exit('Invalid regular expression: '. a:regexp)
+  endif
+  return a:regexp
 endfunction
 
 function! s:parse_args(args)
@@ -695,7 +728,7 @@ function! s:parse_args(args)
 
   " Found regexp
   if !empty(matches)
-    return [matches[1], matches[2], opts, 1]
+    return [matches[1], s:test_regexp(matches[2]), opts, 1]
   else
     let tokens = matchlist(args, '^\([1-9][0-9]*\|-[0-9]*\|\*\*\?\)\?\s*\(.\{-}\)\?$')
     return [tokens[1], tokens[2], opts, 0]
@@ -730,12 +763,17 @@ function! s:align(bang, first_line, last_line, expr)
   " Heuristically determine if the user was in visual mode
   let vis    = a:first_line == line("'<") && a:last_line == line("'>")
 
+  let delimiters = s:easy_align_delimiters_default
+  if exists('g:easy_align_delimiters')
+    let delimiters = extend(copy(delimiters), g:easy_align_delimiters)
+  endif
+
   if empty(a:expr)
-    let [mode, n, ch, opts, regexp] = s:interactive(copy(modes), vis, opts)
+    let [mode, n, ch, opts, regexp] = s:interactive(copy(modes), vis, opts, delimiters)
   else
     let [n, ch, opts, regexp] = s:parse_args(a:expr)
     if empty(n) && empty(ch)
-      let [mode, n, ch, opts, regexp] = s:interactive(copy(modes), vis, opts)
+      let [mode, n, ch, opts, regexp] = s:interactive(copy(modes), vis, opts, delimiters)
     elseif empty(ch)
       " Try swapping n and ch
       let [n, ch] = ['', n]
@@ -747,18 +785,12 @@ function! s:align(bang, first_line, last_line, expr)
   elseif n == '-'  | let nth = -1
   elseif empty(n)  | let nth = 1
   elseif n == '0' || ( n != '-0' && n != string(str2nr(n)) )
-    call s:exit('Invalid field number: '. n)
+    call s:exit('Invalid N-th parameter: '. n)
   else
     let nth = n
   endif
 
-  let delimiters = s:easy_align_delimiters_default
-  if exists('g:easy_align_delimiters')
-    let delimiters = extend(copy(delimiters), g:easy_align_delimiters)
-  endif
-
   if regexp
-    call s:test_regexp(ch)
     let dict = { 'pattern': ch }
   else
     " Resolving command-line ambiguity
@@ -828,6 +860,6 @@ function! s:align(bang, first_line, last_line, expr)
     \ )
     call extend(copts, { 'm': aseq_str })
   endif
-  call s:echon('', n, regexp, ch, copts)
+  call s:echon('', n, regexp, ch, copts, '')
 endfunction
 
