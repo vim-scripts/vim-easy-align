@@ -6,7 +6,10 @@ Project home (latest version):
 https://github.com/junegunn/vim-easy-align
 
 Demo:
-https://raw.github.com/junegunn/vim-easy-align/gif/vim-easy-align.gif
+https://raw.github.com/junegunn/i/master/vim-easy-align.gif
+
+Quick start guide:
+https://github.com/junegunn/vim-easy-align#tldr---one-minute-guide
 
 Features:
 - Makes the common case easy
